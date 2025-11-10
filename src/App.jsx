@@ -2,14 +2,14 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
 /**
- * Mesa Compartilhada — Cenas & NPCs (versão estável)
- * - Cenas: cabem sempre na área (object-contain), sem cortar.
- * - NPCs: aparecem/ somem com fade; podem tremer (sutil); dá pra arrastar e redimensionar.
- * - Demo: salva em localStorage + sincroniza entre abas da MESMA máquina via BroadcastChannel.
- * - Opcional Firebase: deixei ganchos, mas pode usar só o Demo enquanto testa.
+ * Mesa Compartilhada — Cenas & NPCs (Firebase ALWAYS ON)
+ * - Cenas: cabem na área (object-contain), sem corte.
+ * - NPCs: fade, tremor opcional; arrastar e redimensionar; viewer não mexe.
+ * - SINCRONIZAÇÃO: SEMPRE via Firebase Realtime Database.
+ * - URL de visualização para jogadores: ?room=SALA&role=viewer
  */
 
-/*************** CONFIG (Firebase opcional – pode deixar vazio) ***************/
+/*************** CONFIG (Firebase Realtime Database) ***************/
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyBcoqQL7Cv-iiEE1_i8xeIcEuzaC2rSxsE",
   authDomain: "mesa-rpg-8a4b9.firebaseapp.com",
@@ -17,7 +17,7 @@ const FIREBASE_CONFIG = {
   projectId: "mesa-rpg-8a4b9",
   storageBucket: "mesa-rpg-8a4b9.firebasestorage.app",
   messagingSenderId: "196938820959",
-  appId: "1:196938820959:web:8e2f8ac490f152ff465aea"
+  appId: "1:196938820959:web:8e2f8ac490f152ff465aea",
 };
 
 /**************************** UTILS ****************************/
@@ -27,14 +27,10 @@ const defaultState = () => ({
   scenes: [],
   npcs: [],
   currentSceneId: null,
-  // overlay: por NPC (id): { visible, x, y, scale }
-  overlay: {},
+  overlay: {}, // por NPC (id): { visible, x, y, scale }
   options: { fadeDurationMs: 450, npcShake: true, showGrid: false },
 });
 
-const STORAGE_KEY = "mesa-compartilhada-state";
-
-/**************************** URL PARAMS ****************************/
 function useQueryParams() {
   const [params, setParams] = useState(() => new URLSearchParams(window.location.search));
   useEffect(() => {
@@ -53,70 +49,47 @@ function useQueryParams() {
   return [params, setParam];
 }
 
-/**************************** SYNC LAYER ****************************/
-/** Usa:
- *  - DEMO: localStorage + BroadcastChannel (entre abas da MESMA máquina)
- *  - Firebase: se você preencher o FIREBASE_CONFIG (opcional)
- */
+/**************************** SYNC (Firebase only) ****************************/
+// Sempre usa Firebase Realtime Database
 function createSync(room, onChange) {
-  const hasFirebase = Boolean(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.databaseURL);
-  let cleanup = () => {};
+  if (!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.databaseURL)) {
+    console.error("Faltam chaves do Firebase no FIREBASE_CONFIG.");
+  }
 
-  // Define o objeto primeiro (evita "Cannot access 'sync' before initialization")
+  let cleanup = () => {};
   const sync = {
     write: (_next) => {},
     patch: (_partial) => {},
     destroy: () => cleanup(),
   };
 
-  if (hasFirebase) {
-    // Carregamento preguiçoso do Firebase via CDN
-    import("https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js").then(({ initializeApp }) => {
-      import("https://www.gstatic.com/firebasejs/10.13.1/firebase-database.js").then(
-        ({ getDatabase, ref, onValue, set, update })
-      ).then((mods) => {
-        const { getDatabase, ref, onValue, set, update } = (mods || {});
-        const app = initializeApp(FIREBASE_CONFIG);
-        const db = getDatabase(app);
-        const roomRef = ref(db, `rooms/${room}`);
+  // Carrega Firebase via CDN
+  import("https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js")
+    .then(({ initializeApp }) => {
+      return Promise.all([
+        Promise.resolve(initializeApp),
+        import("https://www.gstatic.com/firebasejs/10.13.1/firebase-database.js"),
+      ]);
+    })
+    .then(([initializeApp, mods]) => {
+      const { getDatabase, ref, onValue, set, update } = mods;
+      const app = initializeApp(FIREBASE_CONFIG);
+      const db = getDatabase(app);
+      const roomRef = ref(db, `rooms/${room}`);
 
-        onValue(roomRef, (snap) => {
-          const val = snap.val();
-          if (val) onChange(val);
-        });
+      // Ouve mudanças da sala
+      onValue(roomRef, (snap) => {
+        const val = snap.val();
+        if (val) onChange(val);
+        else onChange(defaultState()); // se a sala estiver vazia, começa com estado padrão
+      });
 
-        sync.write = async (next) => set(roomRef, next);
-        sync.patch = async (partial) => update(roomRef, partial);
-      }).catch(() => {});
-    }).catch(() => {});
-  } else {
-    // DEMO: localStorage + BroadcastChannel
-    const bc = "BroadcastChannel" in window ? new BroadcastChannel(`mesa-${room}`) : null;
-    const handler = (ev) => {
-      if (ev?.data?.type === "state") onChange(ev.data.payload);
-    };
-    bc?.addEventListener("message", handler);
-
-    cleanup = () => {
-      bc?.removeEventListener("message", handler);
-      bc?.close?.();
-    };
-
-    sync.write = (next) => {
-      localStorage.setItem(`${STORAGE_KEY}:${room}`, JSON.stringify(next));
-      bc?.postMessage({ type: "state", payload: next });
-    };
-    sync.patch = (partial) => {
-      const current = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:${room}`) || "null") || defaultState();
-      const next = { ...current, ...partial };
-      localStorage.setItem(`${STORAGE_KEY}:${room}`, JSON.stringify(next));
-      bc?.postMessage({ type: "state", payload: next });
-    };
-
-    // Estado salvo localmente
-    const initial = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:${room}`) || "null");
-    if (initial) onChange(initial);
-  }
+      sync.write = async (next) => set(roomRef, next);
+      sync.patch = async (partial) => update(roomRef, partial);
+    })
+    .catch((e) => {
+      console.error("Falha ao carregar Firebase:", e);
+    });
 
   return sync;
 }
@@ -125,46 +98,28 @@ function createSync(room, onChange) {
 export default function App() {
   const [params, setParam] = useQueryParams();
   const initialRoom = params.get("room") || "demo";
-  const initialRole = params.get("role") || "viewer"; // "gm" | "viewer"
+  const initialRole = params.get("role") || "viewer"; // default viewer p/ não vazar tela do mestre
 
   const [room, setRoom] = useState(initialRoom);
   const [role, setRole] = useState(initialRole);
-  const [useFirebase, setUseFirebase] = useState(false);
   const [state, setState] = useState(defaultState());
-const [hydrated, setHydrated] = useState(false);
-const syncRef = useRef(null);
+  const syncRef = useRef(null);
 
-  // Inicia camada de sync
+  // Inicia camada de sync SEMPRE via Firebase
   useEffect(() => {
-  // 1) Pré-carrega do localStorage para não “zerar” o estado na primeira render
-  try {
-    const initial = JSON.parse(localStorage.getItem(`${STORAGE_KEY}:${room}`) || "null");
-    if (initial) setState(initial);
-  } catch {}
-  setHydrated(true);
+    syncRef.current?.destroy?.();
+    const sync = createSync(room, (incoming) => setState(incoming));
+    syncRef.current = sync;
+    return () => sync.destroy();
+  }, [room]);
 
-  // 2) Inicia a camada de sync
-  syncRef.current?.destroy?.();
-  const sync = createSync(room, (incoming) => setState(incoming));
-  syncRef.current = sync;
-  return () => sync.destroy();
-}, [room]);
-
-  // Persiste no DEMO
-  useEffect(() => {
-  if (!hydrated) return; // evita sobrescrever com estado vazio
-  try {
-    localStorage.setItem(`${STORAGE_KEY}:${room}`, JSON.stringify(state));
-  } catch {}
-}, [state, room, hydrated]);
-
-  // Reflete na URL
+  // Reflete sala/papel na URL (útil pra compartilhar link)
   useEffect(() => {
     setParam("room", room);
     setParam("role", role);
   }, [room, role]);
 
-  // Helpers de escrita (sempre atualiza local; se houver sync, envia)
+  // Ações de escrita (local + remoto)
   const writeState = (next) => {
     setState(next);
     syncRef.current?.write?.(next);
@@ -174,7 +129,7 @@ const syncRef = useRef(null);
     syncRef.current?.patch?.(partial);
   };
 
-  // Seleciona 1ª cena automaticamente, se ainda não houver
+  // Seleciona primeira cena automaticamente
   useEffect(() => {
     if (!state.currentSceneId && state.scenes.length > 0) {
       setState((prev) => ({ ...prev, currentSceneId: prev.scenes[0].id }));
@@ -195,9 +150,7 @@ const syncRef = useRef(null);
 
   return (
     <div className="min-h-screen" style={{ background: "#0b1220", color: "#e6ecff" }}>
-      {/* CSS mínimo para quem não tem Tailwind setado */}
       <CssInject />
-
       <header style={{ padding: "12px 16px", borderBottom: "1px solid #1b2540", display: "flex", gap: 12, alignItems: "center" }}>
         <span style={{ fontSize: 18, fontWeight: 600 }}>🎮 Mesa Compartilhada — Cenas & NPCs</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
@@ -225,15 +178,6 @@ const syncRef = useRef(null);
           >
             Link de visualização
           </a>
-          <label className="flex items-center gap-2 text-xs ml-3">
-  <input
-    type="checkbox"
-    checked={useFirebase}
-    onChange={(e) => setUseFirebase(e.target.checked)}
-  />
-  Usar Firebase
-</label>
-
         </div>
       </header>
 
@@ -310,18 +254,8 @@ function ScenesPanel({ state, writeState, patchState }) {
       <h2 style={{ fontSize: 13, opacity: .8, marginBottom: 8 }}>Gerenciar Cenas</h2>
 
       <div style={{ display: "grid", gap: 8 }}>
-        <input
-          style={inputStyle}
-          placeholder="Nome da cena"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-        />
-        <input
-          style={inputStyle}
-          placeholder="URL da imagem (recomendado)"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-        />
+        <input style={inputStyle} placeholder="Nome da cena" value={name} onChange={(e) => setName(e.target.value)} />
+        <input style={inputStyle} placeholder="URL da imagem (recomendado)" value={url} onChange={(e) => setUrl(e.target.value)} />
         <label style={{ fontSize: 12, opacity: .7 }}>ou</label>
         <input type="file" accept="image/*" onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])} style={{ fontSize: 12 }} />
         {(url || filePreview) && <div style={{ fontSize: 12, opacity: .7 }}>Preview carregado.</div>}
@@ -474,8 +408,8 @@ function Stage({ state, patchState, currentScene, role }) {
   const fadeMs = state.options.fadeDurationMs || 450;
 
   const onMouseDownNpc = (id, e) => {
+    if (role !== "gm") return;
     const ov = state.overlay[id] || { x: 50, y: 80, visible: true, scale: 100 };
-    // garantir visível ao interagir
     const ensure = { ...state.overlay, [id]: { ...ov, visible: true } };
     patchState({ overlay: ensure });
     setDragging({ id, startX: e.clientX, startY: e.clientY, baseX: ov.x, baseY: ov.y });
@@ -509,7 +443,6 @@ function Stage({ state, patchState, currentScene, role }) {
     patchState({ overlay: nextOverlay });
   };
 
-  // Área de cena: sempre do mesmo tamanho visual (sem corte): object-contain
   return (
     <div style={{ position: "relative", overflow: "hidden", background: "#0b1220" }}>
       <div
@@ -544,7 +477,6 @@ function Stage({ state, patchState, currentScene, role }) {
               </div>
             )}
 
-            {/* grade (opcional) */}
             {state.options.showGrid && (
               <div
                 style={{
@@ -556,7 +488,6 @@ function Stage({ state, patchState, currentScene, role }) {
               />
             )}
 
-            {/* NPCs visíveis (por cima) */}
             {state.npcs.map((npc) => {
               const ov = state.overlay[npc.id];
               if (!ov?.visible) return null;
@@ -565,17 +496,17 @@ function Stage({ state, patchState, currentScene, role }) {
               const sc = (ov.scale ?? 100) / 100;
               return (
                 <DraggableNpc
-  key={npc.id}
-  npc={npc}
-  x={x}
-  y={y}
-  scale={sc}
-  onMouseDown={(e) => onMouseDownNpc(npc.id, e)}
-  onScale={(val) => setScale(npc.id, val)}
-  fadeMs={fadeMs}
-  shake={npc.shake && state.options.npcShake}
-  role={role}
-/>
+                  key={npc.id}
+                  npc={npc}
+                  x={x}
+                  y={y}
+                  scale={sc}
+                  onMouseDown={(e) => onMouseDownNpc(npc.id, e)}
+                  onScale={(val) => setScale(npc.id, val)}
+                  fadeMs={fadeMs}
+                  shake={npc.shake && state.options.npcShake}
+                  role={role}
+                />
               );
             })}
           </motion.div>
@@ -595,27 +526,27 @@ function DraggableNpc({ npc, x, y, scale, onMouseDown, onScale, fadeMs, shake, r
       style={{ position: "absolute", left: `${x}%`, top: `${y}%`, transform: `translate(-50%, -50%)`, zIndex: 10 }}
     >
       <div
-  onMouseDown={role === "gm" ? onMouseDown : undefined}
-  style={{
-    cursor: role === "gm" ? "move" : "default",
-    userSelect: "none",
-    animation: shake ? "npcShake 2s ease-in-out infinite" : "none",
-    filter: "drop-shadow(0 8px 24px rgba(0,0,0,.6))",
-    pointerEvents: role === "gm" ? "auto" : "none",
-  }}
-  title={role === "gm" ? "Arraste para posicionar" : "Visualização"}
->
+        onMouseDown={role === "gm" ? onMouseDown : undefined}
+        style={{
+          cursor: role === "gm" ? "move" : "default",
+          userSelect: "none",
+          animation: shake ? "npcShake 2s ease-in-out infinite" : "none",
+          filter: "drop-shadow(0 8px 24px rgba(0,0,0,.6))",
+          pointerEvents: role === "gm" ? "auto" : "none",
+        }}
+        title={role === "gm" ? "Arraste para posicionar" : "Visualização"}
+      >
         {npc.imageUrl ? (
           <img
-  src={npc.imageUrl}
-  alt={npc.name}
-  style={{
-    maxHeight: "50vh",
-    objectFit: "contain",
-    transform: `scale(${scale})`,
-    transformOrigin: "center center",
-  }}
-/>
+            src={npc.imageUrl}
+            alt={npc.name}
+            style={{
+              maxHeight: "50vh",
+              objectFit: "contain",
+              transform: `scale(${scale})`,
+              transformOrigin: "center center",
+            }}
+          />
         ) : (
           <div style={{ padding: "6px 10px", background: "rgba(30,41,59,.8)", border: "1px solid #334155", borderRadius: 6, fontSize: 13 }}>
             {npc.name}
@@ -623,18 +554,18 @@ function DraggableNpc({ npc, x, y, scale, onMouseDown, onScale, fadeMs, shake, r
         )}
       </div>
       {role === "gm" && (
-  <div style={{ display: "flex", justifyContent: "center", marginTop: 8, pointerEvents: "auto" }}>
-    <input
-      type="range"
-      min={50}
-      max={200}
-      defaultValue={scale * 100}
-      onChange={(e) => onScale(Number(e.target.value))}
-      style={{ width: 160 }}
-      title="Tamanho do NPC"
-    />
-  </div>
-)}
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 8, pointerEvents: "auto" }}>
+          <input
+            type="range"
+            min={50}
+            max={200}
+            defaultValue={scale * 100}
+            onChange={(e) => onScale(Number(e.target.value))}
+            style={{ width: 160 }}
+            title="Tamanho do NPC"
+          />
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -685,7 +616,7 @@ const rowCard = {
   gap: 8,
 };
 
-/* Injeta animação de tremor sem depender de Tailwind */
+/* Tremor sem Tailwind */
 function CssInject() {
   useEffect(() => {
     const style = document.createElement("style");
