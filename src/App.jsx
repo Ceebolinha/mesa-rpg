@@ -1,12 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 
 /**
  * Mesa Compartilhada — Cenas & NPCs (Firebase ALWAYS ON)
- * - Cenas: cabem na área (object-contain), sem corte.
- * - NPCs: fade, tremor opcional; arrastar e redimensionar; viewer não mexe.
- * - SINCRONIZAÇÃO: SEMPRE via Firebase Realtime Database.
- * - URL de visualização para jogadores: ?room=SALA&role=viewer
+ * - Cenas cabem no palco (object-contain), sem cobrir header/painel/rodapé.
+ * - NPCs com fade; arrastar/redimensionar somente no papel "gm".
+ * - Sempre sincroniza via Firebase Realtime Database.
+ * - Link p/ jogadores: ?room=SALA&role=viewer
  */
 
 /*************** CONFIG (Firebase Realtime Database) ***************/
@@ -27,10 +27,11 @@ const defaultState = () => ({
   scenes: [],
   npcs: [],
   currentSceneId: null,
-  overlay: {}, // por NPC (id): { visible, x, y, scale }
+  overlay: {}, // npcId -> { visible, x, y, scale }
   options: { fadeDurationMs: 450, npcShake: true, showGrid: false },
 });
 
+/**************************** URL PARAMS ****************************/
 function useQueryParams() {
   const [params, setParams] = useState(() => new URLSearchParams(window.location.search));
   useEffect(() => {
@@ -52,10 +53,6 @@ function useQueryParams() {
 /**************************** SYNC (Firebase only) ****************************/
 // Sempre usa Firebase Realtime Database
 function createSync(room, onChange) {
-  if (!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.databaseURL)) {
-    console.error("Faltam chaves do Firebase no FIREBASE_CONFIG.");
-  }
-
   let cleanup = () => {};
   const sync = {
     write: (_next) => {},
@@ -63,33 +60,33 @@ function createSync(room, onChange) {
     destroy: () => cleanup(),
   };
 
-  // Carrega Firebase via CDN
+  // Carrega Firebase via CDN (sem TypeScript, sem await fora de função)
   import("https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js")
-    .then(({ initializeApp }) => {
-      return Promise.all([
-        Promise.resolve(initializeApp),
-        import("https://www.gstatic.com/firebasejs/10.13.1/firebase-database.js"),
-      ]);
-    })
-    .then(([initializeApp, mods]) => {
-      const { getDatabase, ref, onValue, set, update } = mods;
-      const app = initializeApp(FIREBASE_CONFIG);
-      const db = getDatabase(app);
-      const roomRef = ref(db, `rooms/${room}`);
+    .then(({ initializeApp }) =>
+      import("https://www.gstatic.com/firebasejs/10.13.1/firebase-database.js").then(
+        ({ getDatabase, ref, onValue, set, update }) => {
+          const app = initializeApp(FIREBASE_CONFIG);
+          const db = getDatabase(app);
+          const roomRef = ref(db, `rooms/${room}`);
 
-      // Ouve mudanças da sala
-      onValue(roomRef, (snap) => {
-        const val = snap.val();
-        if (val) onChange(val);
-        else onChange(defaultState()); // se a sala estiver vazia, começa com estado padrão
-      });
+           onValue(roomRef, (snap) => {
+  const val = snap.val();
+  const merged = { ...defaultState(), ...(val || {}) };
 
-      sync.write = async (next) => set(roomRef, next);
-      sync.patch = async (partial) => update(roomRef, partial);
-    })
-    .catch((e) => {
-      console.error("Falha ao carregar Firebase:", e);
-    });
+  onChange(merged);
+
+  if (!val) {
+    set(roomRef, merged);
+  }
+});
+
+
+          sync.write = async (next) => set(roomRef, next);
+          sync.patch = async (partial) => update(roomRef, partial);
+        }
+      )
+    )
+    .catch((e) => console.error("Falha ao carregar Firebase:", e));
 
   return sync;
 }
@@ -98,17 +95,22 @@ function createSync(room, onChange) {
 export default function App() {
   const [params, setParam] = useQueryParams();
   const initialRoom = params.get("room") || "demo";
-  const initialRole = params.get("role") || "viewer"; // default viewer p/ não vazar tela do mestre
+  const initialRole = params.get("role") || "viewer"; // default viewer p/ não vazar GM
 
   const [room, setRoom] = useState(initialRoom);
   const [role, setRole] = useState(initialRole);
   const [state, setState] = useState(defaultState());
+  const [hydrated, setHydrated] = useState(false);
   const syncRef = useRef(null);
 
   // Inicia camada de sync SEMPRE via Firebase
   useEffect(() => {
     syncRef.current?.destroy?.();
-    const sync = createSync(room, (incoming) => setState(incoming));
+    const sync = createSync(room, (incoming) => {
+  setState((prev) => ({ ...prev, ...incoming })); // garante merge
+  setHydrated(true); // marca que carregou
+});
+
     syncRef.current = sync;
     return () => sync.destroy();
   }, [room]);
@@ -129,7 +131,7 @@ export default function App() {
     syncRef.current?.patch?.(partial);
   };
 
-  // Seleciona primeira cena automaticamente
+  // Seleciona primeira cena automaticamente quando passar a existir
   useEffect(() => {
     if (!state.currentSceneId && state.scenes.length > 0) {
       setState((prev) => ({ ...prev, currentSceneId: prev.scenes[0].id }));
@@ -151,20 +153,47 @@ export default function App() {
   return (
     <div className="min-h-screen" style={{ background: "#0b1220", color: "#e6ecff" }}>
       <CssInject />
-      <header style={{ padding: "12px 16px", borderBottom: "1px solid #1b2540", display: "flex", gap: 12, alignItems: "center" }}>
+
+      <header
+        style={{
+          padding: "12px 16px",
+          borderBottom: "1px solid #1b2540",
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          position: "relative",
+          zIndex: 10,
+          background: "#0b1220",
+        }}
+      >
         <span style={{ fontSize: 18, fontWeight: 600 }}>🎮 Mesa Compartilhada — Cenas & NPCs</span>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <label style={{ fontSize: 12, opacity: .8 }}>Sala</label>
+          <label style={{ fontSize: 12, opacity: 0.8 }}>Sala</label>
           <input
             value={room}
             onChange={(e) => setRoom(e.target.value.trim() || "demo")}
-            style={{ background: "#0f172a", border: "1px solid #233059", borderRadius: 6, padding: "6px 8px", fontSize: 12, width: 120, color: "#e6ecff" }}
+            style={{
+              background: "#0f172a",
+              border: "1px solid #233059",
+              borderRadius: 6,
+              padding: "6px 8px",
+              fontSize: 12,
+              width: 120,
+              color: "#e6ecff",
+            }}
             placeholder="ex.: MANS-A1"
           />
           <select
             value={role}
             onChange={(e) => setRole(e.target.value)}
-            style={{ background: "#0f172a", border: "1px solid #233059", borderRadius: 6, padding: "6px 8px", fontSize: 12, color: "#e6ecff" }}
+            style={{
+              background: "#0f172a",
+              border: "1px solid #233059",
+              borderRadius: 6,
+              padding: "6px 8px",
+              fontSize: 12,
+              color: "#e6ecff",
+            }}
           >
             <option value="gm">Mestre</option>
             <option value="viewer">Jogador (visualizador)</option>
@@ -173,7 +202,7 @@ export default function App() {
             href={viewerUrl}
             target="_blank"
             rel="noreferrer"
-            style={{ fontSize: 12, textDecoration: "underline", opacity: .9, color: "#9bd6ff" }}
+            style={{ fontSize: 12, textDecoration: "underline", opacity: 0.9, color: "#9bd6ff" }}
             title="Abra este link em outro dispositivo para os jogadores"
           >
             Link de visualização
@@ -181,14 +210,34 @@ export default function App() {
         </div>
       </header>
 
-      <main style={{ display: "grid", gridTemplateColumns: role === "gm" ? "360px 1fr" : "1fr", minHeight: "calc(100vh - 96px)" }}>
+      {/* Painel (quando GM) + Palco. Nada absoluto aqui fora do palco. */}
+      <main
+        style={{
+          display: "grid",
+          gridTemplateColumns: role === "gm" ? "360px 1fr" : "1fr",
+          minHeight: "calc(100vh - 96px)",
+          position: "relative",
+          zIndex: 1,
+        }}
+      >
         {role === "gm" ? (
           <GMPanel state={state} writeState={writeState} patchState={patchState} />
         ) : null}
         <Stage state={state} patchState={patchState} currentScene={currentScene} role={role} />
       </main>
 
-      <footer style={{ padding: 12, borderTop: "1px solid #1b2540", textAlign: "center", fontSize: 12, color: "#9aa6bb" }}>
+      <footer
+        style={{
+          padding: 12,
+          borderTop: "1px solid #1b2540",
+          textAlign: "center",
+          fontSize: 12,
+          color: "#9aa6bb",
+          position: "relative",
+          zIndex: 10,
+          background: "#0b1220",
+        }}
+      >
         Dica: use URLs públicas (Imgur, Drive público, Cloudinary) para os jogadores verem as imagens.
       </footer>
     </div>
@@ -216,7 +265,7 @@ function GMPanel({ state, writeState, patchState }) {
       </div>
       {tab === "scenes" && <ScenesPanel state={state} writeState={writeState} patchState={patchState} />}
       {tab === "npcs" && <NpcsPanel state={state} patchState={patchState} />}
-      {tab === "live" && <LivePanel state={state} patchState={patchState} />}
+      {tab === "live" && <LivePanel state={state} patchState={patchState} hydrated={hydrated} />}
     </aside>
   );
 }
@@ -322,8 +371,9 @@ function NpcsPanel({ state, patchState }) {
   const addNpc = () => {
     const id = uid();
     const imageUrl = url || filePreview || "";
-    const next = { ...state, npcs: [...state.npcs, { id, name: name || "Novo NPC", imageUrl, shake }] };
-    patchState(next);
+    patchState({
+  npcs: [...state.npcs, { id, name: name || "Novo NPC", imageUrl, shake }]
+});
     setName(""); setUrl(""); setFilePreview(""); setShake(true);
   };
 
@@ -334,8 +384,9 @@ function NpcsPanel({ state, patchState }) {
   };
 
   const removeNpc = (id) => {
-    const next = { ...state, npcs: state.npcs.filter((n) => n.id !== id) };
-    patchState(next);
+    patchState({
+  npcs: state.npcs.filter((n) => n.id !== id)
+});
     if (state.overlay[id]) {
       const nextOverlay = { ...state.overlay };
       delete nextOverlay[id];
@@ -373,15 +424,16 @@ function NpcsPanel({ state, patchState }) {
   );
 }
 
-function LivePanel({ state, patchState }) {
+function LivePanel({ state, patchState, hydrated }) {
   const [fadeMs, setFadeMs] = useState(state.options.fadeDurationMs || 450);
   const [npcShake, setNpcShake] = useState(state.options.npcShake);
   const [showGrid, setShowGrid] = useState(state.options.showGrid);
 
   useEffect(() => {
-    patchState({ options: { ...state.options, fadeDurationMs: fadeMs, npcShake, showGrid } });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fadeMs, npcShake, showGrid]);
+  if (!hydrated) return; // ← impede salvar cedo demais
+  patchState({ options: { ...state.options, fadeDurationMs: fadeMs, npcShake, showGrid } });
+}, [fadeMs, npcShake, showGrid, hydrated]);
+
 
   return (
     <div style={{ padding: 12, display: "grid", gap: 8, fontSize: 13 }}>
@@ -404,6 +456,7 @@ function LivePanel({ state, patchState }) {
 /**************************** STAGE ****************************/
 function Stage({ state, patchState, currentScene, role }) {
   const stageRef = useRef(null);
+  const lastWrite = useRef(0);
   const [dragging, setDragging] = useState(null); // { id, startX, startY, baseX, baseY }
   const fadeMs = state.options.fadeDurationMs || 450;
 
@@ -419,6 +472,9 @@ function Stage({ state, patchState, currentScene, role }) {
     const onMove = (e) => {
       if (!dragging) return;
       const { id, startX, startY, baseX, baseY } = dragging;
+      const now = Date.now();
+if (now - lastWrite.current < 50) return;
+lastWrite.current = now;
       const dx = e.clientX - startX;
       const dy = e.clientY - startY;
       const rect = stageRef.current?.getBoundingClientRect();
@@ -444,74 +500,85 @@ function Stage({ state, patchState, currentScene, role }) {
   };
 
   return (
-    <div style={{ position: "relative", overflow: "hidden", background: "#0b1220" }}>
-      <div
-        ref={stageRef}
-        style={{
-          width: "100%",
-          height: "calc(100vh - 120px)",
-          maxHeight: "calc(100vh - 120px)",
-          margin: "0 auto",
-          background: "black",
-          position: "relative",
-        }}
-      >
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={currentScene?.id || "blank"}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: fadeMs / 1000 }}
-            style={{ position: "absolute", inset: 0 }}
-          >
-            {currentScene?.imageUrl ? (
-              <img
-                src={currentScene.imageUrl}
-                alt={currentScene.name}
-                style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "contain", zIndex: 0 }}
-              />
-            ) : (
-              <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#94a3b8" }}>
-                Sem imagem da cena
-              </div>
-            )}
+    <div
+      ref={stageRef}
+      style={{
+        position: "relative",
+        width: "100%",
+        height: "calc(100vh - 120px)", // palco com altura fixa; não cobre header/rodapé
+        background: "black",
+        overflow: "hidden",
+      }}
+    >
+      {/* Cena */}
+      {currentScene?.imageUrl ? (
+        <img
+          key={currentScene.id}
+          src={currentScene.imageUrl}
+          alt={currentScene.name}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
+            zIndex: 0,
+          }}
+        />
+      ) : (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "grid",
+            placeItems: "center",
+            color: "#94a3b8",
+            background: "black",
+            zIndex: 0,
+          }}
+        >
+          Sem imagem da cena
+        </div>
+      )}
 
-            {state.options.showGrid && (
-              <div
-                style={{
-                  position: "absolute", inset: 0, pointerEvents: "none", opacity: .3, zIndex: 1,
-                  backgroundImage:
-                    "linear-gradient(transparent 95%, rgba(255,255,255,.25) 95%), linear-gradient(90deg, transparent 95%, rgba(255,255,255,.25) 95%)",
-                  backgroundSize: "20px 20px",
-                }}
-              />
-            )}
+      {/* Grade opcional */}
+      {state.options.showGrid && (
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            opacity: 0.3,
+            zIndex: 1,
+            backgroundImage:
+              "linear-gradient(transparent 95%, rgba(255,255,255,.25) 95%), linear-gradient(90deg, transparent 95%, rgba(255,255,255,.25) 95%)",
+            backgroundSize: "20px 20px",
+          }}
+        />
+      )}
 
-            {state.npcs.map((npc) => {
-              const ov = state.overlay[npc.id];
-              if (!ov?.visible) return null;
-              const x = ov.x ?? 50;
-              const y = ov.y ?? 80;
-              const sc = (ov.scale ?? 100) / 100;
-              return (
-                <DraggableNpc
-                  key={npc.id}
-                  npc={npc}
-                  x={x}
-                  y={y}
-                  scale={sc}
-                  onMouseDown={(e) => onMouseDownNpc(npc.id, e)}
-                  onScale={(val) => setScale(npc.id, val)}
-                  fadeMs={fadeMs}
-                  shake={npc.shake && state.options.npcShake}
-                  role={role}
-                />
-              );
-            })}
-          </motion.div>
-        </AnimatePresence>
-      </div>
+      {/* NPCs (por cima) */}
+      {state.npcs.map((npc) => {
+        const ov = state.overlay[npc.id];
+        if (!ov?.visible) return null;
+        const x = ov.x ?? 50;
+        const y = ov.y ?? 80;
+        const sc = (ov.scale ?? 100) / 100;
+        return (
+          <DraggableNpc
+            key={npc.id}
+            npc={npc}
+            x={x}
+            y={y}
+            scale={sc}
+            onMouseDown={(e) => onMouseDownNpc(npc.id, e)}
+            onScale={(val) => setScale(npc.id, val)}
+            fadeMs={fadeMs}
+            shake={npc.shake && state.options.npcShake}
+            role={role}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -533,6 +600,8 @@ function DraggableNpc({ npc, x, y, scale, onMouseDown, onScale, fadeMs, shake, r
           animation: shake ? "npcShake 2s ease-in-out infinite" : "none",
           filter: "drop-shadow(0 8px 24px rgba(0,0,0,.6))",
           pointerEvents: role === "gm" ? "auto" : "none",
+          transform: `scale(${scale})`,
+          transformOrigin: "center center",
         }}
         title={role === "gm" ? "Arraste para posicionar" : "Visualização"}
       >
@@ -540,12 +609,7 @@ function DraggableNpc({ npc, x, y, scale, onMouseDown, onScale, fadeMs, shake, r
           <img
             src={npc.imageUrl}
             alt={npc.name}
-            style={{
-              maxHeight: "50vh",
-              objectFit: "contain",
-              transform: `scale(${scale})`,
-              transformOrigin: "center center",
-            }}
+            style={{ maxHeight: "50vh", objectFit: "contain", display: "block" }}
           />
         ) : (
           <div style={{ padding: "6px 10px", background: "rgba(30,41,59,.8)", border: "1px solid #334155", borderRadius: 6, fontSize: 13 }}>
@@ -553,6 +617,7 @@ function DraggableNpc({ npc, x, y, scale, onMouseDown, onScale, fadeMs, shake, r
           </div>
         )}
       </div>
+
       {role === "gm" && (
         <div style={{ display: "flex", justifyContent: "center", marginTop: 8, pointerEvents: "auto" }}>
           <input
