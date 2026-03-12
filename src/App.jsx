@@ -24,8 +24,8 @@ const FIREBASE_CONFIG = {
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 const defaultState = () => ({
-  scenes: [],
-  npcs: [],
+  scenes: {},
+  npcs: {},
   currentSceneId: null,
   overlay: {}, // npcId -> { visible, x, y, scale }
   options: { fadeDurationMs: 450, npcShake: true, showGrid: false },
@@ -54,39 +54,38 @@ function useQueryParams() {
 // Sempre usa Firebase Realtime Database
 function createSync(room, onChange) {
   let cleanup = () => {};
+
   const sync = {
-    write: (_next) => {},
-    patch: (_partial) => {},
-    destroy: () => cleanup(),
+    write: async () => {},
+    patch: async () => {},
+    destroy: () => cleanup()
   };
 
-  // Carrega Firebase via CDN (sem TypeScript, sem await fora de função)
   import("https://www.gstatic.com/firebasejs/10.13.1/firebase-app.js")
     .then(({ initializeApp }) =>
-      import("https://www.gstatic.com/firebasejs/10.13.1/firebase-database.js").then(
-        ({ getDatabase, ref, onValue, set, update }) => {
+      import("https://www.gstatic.com/firebasejs/10.13.1/firebase-database.js")
+        .then(({ getDatabase, ref, onValue, update, set }) => {
+
           const app = initializeApp(FIREBASE_CONFIG);
           const db = getDatabase(app);
           const roomRef = ref(db, `rooms/${room}`);
 
-           onValue(roomRef, (snap) => {
-  const val = snap.val();
-  const merged = { ...defaultState(), ...(val || {}) };
+          cleanup = onValue(roomRef, (snap) => {
+            const val = snap.val();
+            const merged = { ...defaultState(), ...(val || {}) };
+            onChange(merged);
 
-  onChange(merged);
+            if (!val) {
+              set(roomRef, merged);
+            }
+          });
 
-  if (!val) {
-    set(roomRef, merged);
-  }
-});
-
-
-          sync.write = async (next) => set(roomRef, next);
+          sync.write = async (next) => update(roomRef, next);
           sync.patch = async (partial) => update(roomRef, partial);
-        }
-      )
+
+        })
     )
-    .catch((e) => console.error("Falha ao carregar Firebase:", e));
+    .catch((e) => console.error("Firebase load error:", e));
 
   return sync;
 }
